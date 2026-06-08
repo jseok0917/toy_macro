@@ -1,0 +1,33 @@
+---
+description: Python·Selenium·undetected-chromedriver 코딩 규칙
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python / Selenium 규칙
+
+## 의존성
+
+- 가상환경: `.venv` — `requirements.txt` 기준
+- Chrome 자동화: `undetected-chromedriver` (일반 Selenium 단독 사용 금지, 키이스케이프 차단됨)
+
+## browser.py 패턴
+
+- `create_driver(mode="profile")` — 기본, uc + `chrome_profile/`
+- `create_driver(mode="attach")` — 디버그 Chrome 연결 (키이스케이프 비권장)
+- Chrome 버전: `_get_chrome_major_version()` 또는 `config.CHROME_VERSION_MAIN`
+
+## Selenium 안전
+
+- **드라이버 호출은 메인 스레드에서만** (`hotkey.py`가 보장)
+- `driver.implicitly_wait(10)` — find 실패 시 최대 10초; 매크로 경로는 명시적 `WebDriverWait` 선호
+- `driver.get()` **전에** `apply_keyescape_bypass(driver)` (keyescape URL)
+
+## 설정
+
+- URL·날짜 offset·시간·타임아웃 → `config.py`에 두고 하드코딩 지양
+- `MACRO_DAY_OFFSET`, `MACRO_TIME`, `MACRO_WAIT_TIMEOUT` 등
+
+## 출력
+
+- 사용자 피드백은 `[Macro]`, `[Chrome]`, `[Hotkey]`, `[Bypass]` 접두사 + `flush=True`

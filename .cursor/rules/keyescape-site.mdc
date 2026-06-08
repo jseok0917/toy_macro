@@ -1,0 +1,50 @@
+---
+description: keyescape.com 사이트·API·devtools 우회·예약 변수
+globs: "{keyescape_bypass.py,macro.py,config.py,main.py}"
+alwaysApply: false
+---
+
+# 키이스케이프 사이트
+
+## 예약 변수 (`config.py` — 여기만 수정)
+
+| 변수 | 설명 |
+|------|------|
+| `ZIZUM_NUM` | 지점 |
+| `THEME_NUM` | 테마 |
+| `THEME_INFO_NUM` | 테마 상세 |
+| `AUTO_RUN_AT` | 서버 KST 자동 실행 `HH:MM` |
+| `AUTO_RUN_ENABLED` | 자동 실행 on/off |
+| `MACRO_DAY_OFFSET` | 서버 SYSDATE+N |
+| `MACRO_TIME` | 예약 시간 슬롯 |
+
+URL: `config.build_reservation_url()`
+
+- CDN: `devtools-detector/2.0.22` + inline `blockDevTools()`
+- Selenium CDP 연결도 "devtools open"으로 오탐
+- 우회: `keyescape_bypass.apply_keyescape_bypass()` — CDN 차단 + JS stub + innerHTML 방어
+- **attach / `--remote-debugging-port` 모드는 우회해도 탐지될 수 있음**
+
+## 예약 API (`POST /controller/run_proc.php`)
+
+| `t` | 용도 |
+|-----|------|
+| `get_theme_info_list` | 지점별 테마 (`zizum_num`) |
+| `get_theme_date` | 테마 상세+달력 (`num`=theme_info_num) |
+| `get_caledar_data` | 월 변경 (`year`, `month`) |
+| `get_theme_time` | 시간대 (`date`, `zizumNum`, `themeNum`, `endDay`) |
+
+## URL 파라미터
+
+- `zizum_num` — 지점
+- `theme_num` — 테마
+- `theme_info_num` — 테마 상세 (get_theme_date의 `num`)
+
+## 기본 예약 URL (config/main 기본값)
+
+`reservation1.php?zizum_num=23&theme_num=69&theme_info_num=60` (후즈데어 투투 어드벤쳐)
+
+## 매크로 확장
+
+- 2단계(`reservation2.php`) 로직은 별도 함수로 분리
+- API 직접 호출 vs Selenium 클릭 — UI 의존 시 Selenium, 조회만이면 API

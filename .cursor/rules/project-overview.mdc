@@ -1,0 +1,41 @@
+---
+description: 키이스케이프 Selenium 매크로 프로젝트 구조·실행·아키텍처
+alwaysApply: true
+---
+
+# Keyscape 매크로 프로젝트
+
+## 목적
+
+키이스케이프(keyescape.com) 예약 페이지를 **undetected-chromedriver + Selenium**으로 제어하고, **F9**로 예약 매크로를 실행한다.
+
+## 모듈 역할
+
+| 파일 | 역할 |
+|------|------|
+| `main.py` | CLI 진입점, 세션·핫키 루프 |
+| `config.py` | Chrome·매크로 설정 (수정은 여기 우선) |
+| `browser.py` | uc Chrome 생성 (`profile` / `attach`) |
+| `keyescape_bypass.py` | devtools-detector 우회 (get 전 CDP 주입) |
+| `macro.py` | F9 매크로 본체 (`run_macro`) |
+| `hotkey.py` | F9/ESC 전역 핫키 (Windows GetAsyncKeyState) |
+| `tab_utils.py` | attach 모드 탭 전환 |
+| `manual_wait.py` | Enter 키·캡차 대기 (레거시) |
+
+## 실행 (Windows PowerShell)
+
+```powershell
+cd F:\Workspace\Crawling\keyscape
+.\run.bat              # 접속 + F9 대기
+.\run.bat --once       # 접속만
+.\.venv\Scripts\python.exe main.py
+```
+
+- `run.bat` ❌ → `.\run.bat` ✅ (PowerShell)
+- venv 없이 `python main.py` ❌ → selenium 미설치 오류
+
+## 제약
+
+- **headless / attach(`start_chrome.bat`)는 키이스케이프에서 devtools 탐지로 차단됨** → `profile` + `USE_UNDETECTED=True` 사용
+- 터미널을 닫으면 F9 핫키 루프 종료 (Chrome만 남을 수 있음)
+- 매크로 로직 추가·변경은 `macro.py`, 설정은 `config.py`

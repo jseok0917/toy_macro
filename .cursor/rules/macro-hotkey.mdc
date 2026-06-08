@@ -1,0 +1,38 @@
+---
+description: F9 매크로·핫키 개발 규칙
+globs: "{macro.py,hotkey.py,main.py}"
+alwaysApply: false
+---
+
+# 매크로 / 핫키
+
+## 흐름
+
+1. `run_session()` → Chrome + 페이지 접속
+2. `[Ready]` 후 `HotkeyListener.run_forever(on_macro=run_macro)`
+3. F9 → `macro.run_macro(driver)` (메인 스레드)
+
+## macro.py 수정 시
+
+- 진입점: `run_macro(driver)` 만 확장
+- `_running` + `_lock`으로 중복 실행 방지 유지
+- 예약 UI 셀렉터:
+  - 날짜: `.selDate.available[data-date='YYYY-MM-DD']`
+  - 시간: `input.selThemeTimeNum:not([disabled])` + span `09:20`
+  - NEXT: `.btn_next_step` → `reservation2.php`
+
+## 날짜 계산
+
+- `SYSDATE + N` → `date.today() + timedelta(days=config.MACRO_DAY_OFFSET)`
+- 사이트 `doing` 값: 예약 가능 = 오늘 ~ 오늘+(doing-1)일 (프론트 JS)
+
+## hotkey.py
+
+- Windows: `GetAsyncKeyState(VK_F9)` 폴링 (pynput 미사용)
+- 폴백: 터미널 **Enter**
+- Selenium을 핫키 콜백 스레드에서 직접 호출하지 말 것
+
+## main.py finally
+
+- `keep_open=True` → `driver.service.stop()` (Chrome 유지, Selenium 연결만 해제)
+- `--close` → `driver.quit()`
