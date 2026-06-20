@@ -1,12 +1,78 @@
 from selenium import webdriver
+from selenium.common.exceptions import SessionNotCreatedException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 
+import shutil
+import time
 from pathlib import Path
 
 import config
 from tab_utils import is_debug_chrome_running
+
+
+def _clear_stale_profile_locks(profile_dir: Path) -> None:
+    """이전 Chrome 프로세스가 남긴 lock 파일 제거."""
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"):
+        path = profile_dir / name
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
+
+    devtools = profile_dir / "DevToolsActivePort"
+    try:
+        if devtools.exists():
+            devtools.unlink()
+    except OSError:
+        pass
+
+
+def _backup_broken_profile(profile_dir: Path) -> Path:
+    """손상된 프로필을 백업하고 새 프로필 디렉터리 준비."""
+    backup = profile_dir.parent / f"{profile_dir.name}.bak.{int(time.time())}"
+    if profile_dir.exists():
+        shutil.move(str(profile_dir), str(backup))
+        print(f"[Chrome] 손상 프로필 백업: {backup.name}", flush=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return backup
+
+
+def _stealth_chrome_options(*, headless: bool):
+    import undetected_chromedriver as uc
+
+    options = uc.ChromeOptions()
+    options.add_argument("--lang=ko-KR")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+
+    if config.CHROME_BINARY.exists():
+        options.binary_location = str(config.CHROME_BINARY)
+
+    if headless:
+        options.add_argument("--headless=new")
+
+    return options
+
+
+def _launch_stealth_chrome(
+    *,
+    headless: bool,
+    profile_dir: Path,
+    chrome_version: int | None,
+) -> webdriver.Chrome:
+    import undetected_chromedriver as uc
+
+    options = _stealth_chrome_options(headless=headless)
+    return uc.Chrome(
+        options=options,
+        user_data_dir=str(profile_dir),
+        headless=headless,
+        use_subprocess=True,
+        version_main=chrome_version,
+    )
 
 
 def _get_chrome_major_version() -> int | None:
@@ -34,30 +100,34 @@ def _get_chrome_major_version() -> int | None:
 
 def _create_stealth_driver(*, headless: bool, keep_open: bool) -> webdriver.Chrome:
     """undetected-chromedriver — Selenium/개발자도구 탐지 우회."""
-    import undetected_chromedriver as uc
-
-    options = uc.ChromeOptions()
-    options.add_argument("--lang=ko-KR")
-
-    if headless:
-        options.add_argument("--headless=new")
-
-    config.CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    profile_dir = config.CHROME_PROFILE_DIR
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    _clear_stale_profile_locks(profile_dir)
 
     print("[Chrome] undetected-chromedriver (탐지 우회 모드)", flush=True)
-    print(f"[Chrome] 프로필: {config.CHROME_PROFILE_DIR}", flush=True)
+    print(f"[Chrome] 프로필: {profile_dir}", flush=True)
 
     chrome_version = _get_chrome_major_version()
     if chrome_version:
         print(f"[Chrome] 버전: {chrome_version}", flush=True)
 
-    driver = uc.Chrome(
-        options=options,
-        user_data_dir=str(config.CHROME_PROFILE_DIR),
-        headless=headless,
-        use_subprocess=True,
-        version_main=chrome_version,
-    )
+    try:
+        driver = _launch_stealth_chrome(
+            headless=headless,
+            profile_dir=profile_dir,
+            chrome_version=chrome_version,
+        )
+    except SessionNotCreatedException as exc:
+        msg = str(exc).lower()
+        if "chrome not reachable" not in msg and "cannot connect to chrome" not in msg:
+            raise
+        print("[Chrome] 프로필 문제로 실행 실패 - 새 프로필로 재시도", flush=True)
+        _backup_broken_profile(profile_dir)
+        driver = _launch_stealth_chrome(
+            headless=headless,
+            profile_dir=profile_dir,
+            chrome_version=chrome_version,
+        )
 
     if not headless and config.START_MAXIMIZED:
         try:

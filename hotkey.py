@@ -9,12 +9,38 @@ from collections.abc import Callable
 from datetime import date, datetime
 from typing import Literal
 
-from server_time import ServerClock, format_kst, next_run_at, parse_hhmm, seconds_until
+import config
+from server_time import (
+    ServerClock,
+    auto_run_trigger_at,
+    format_kst,
+    next_run_at,
+    parse_hhmm,
+    seconds_until,
+)
 
 Event = Literal["macro", "exit"]
 
 VK_F9 = 0x78
 VK_ESCAPE = 0x1B
+
+_STATUS_INTERVAL_NEAR_SEC = 60.0
+_STATUS_INTERVAL_FAR_SEC = 3600.0
+_STATUS_NEAR_THRESHOLD_SEC = 3600.0
+
+
+def _format_wait_remaining(seconds: float) -> str:
+    if seconds > _STATUS_NEAR_THRESHOLD_SEC:
+        return f"{int(seconds // 3600)}h"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours}h {minutes}m"
+
+
+def _status_log_interval(seconds: float) -> float:
+    if seconds > _STATUS_NEAR_THRESHOLD_SEC:
+        return _STATUS_INTERVAL_FAR_SEC
+    return _STATUS_INTERVAL_NEAR_SEC
 
 
 def _is_key_down(vk_code: int) -> bool:
@@ -76,6 +102,24 @@ class HotkeyListener:
             return 0.25
         return min(10.0, max(1.0, remaining - 30))
 
+    def _drain_events(self) -> Event | None:
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _fire_auto_run(
+        self,
+        clock: ServerClock,
+        hour: int,
+        minute: int,
+        *,
+        next_target: datetime,
+    ) -> tuple[datetime, date]:
+        now = clock.now()
+        print(f"[Schedule] 서버시각 자동 실행: {format_kst(now)}", flush=True)
+        return next_run_at(clock, hour, minute), next_target.date()
+
     def _check_auto_run(
         self,
         clock: ServerClock,
@@ -85,15 +129,48 @@ class HotkeyListener:
         next_target: datetime,
         fired_date: date | None,
     ) -> tuple[datetime, date | None, bool]:
-        now = clock.now()
         clock.maybe_resync_near(next_target)
+        now = clock.now()
+        trigger_at = auto_run_trigger_at(next_target)
 
-        if now >= next_target and fired_date != next_target.date():
-            print(f"[Schedule] 서버시각 자동 실행: {format_kst(now)}", flush=True)
-            new_target = next_run_at(clock, hour, minute)
-            return new_target, next_target.date(), True
+        if now >= trigger_at and fired_date != next_target.date():
+            new_target, fired = self._fire_auto_run(
+                clock, hour, minute, next_target=next_target
+            )
+            return new_target, fired, True
 
         return next_target, fired_date, False
+
+    def _spin_until_auto_run(
+        self,
+        clock: ServerClock,
+        hour: int,
+        minute: int,
+        *,
+        next_target: datetime,
+        fired_date: date | None,
+    ) -> tuple[Event | Literal["auto"], datetime, date | None]:
+        """마지막 수 초: HTTP sync 없이 sub-ms 폴링으로 트리거 감지."""
+        trigger_ts = auto_run_trigger_at(next_target).timestamp()
+        while self._running:
+            if sys.platform == "win32":
+                self._poll_keys()
+
+            event = self._drain_events()
+            if event in ("exit", "macro"):
+                return event, next_target, fired_date
+
+            if clock.now().timestamp() >= trigger_ts and fired_date != next_target.date():
+                new_target, fired = self._fire_auto_run(
+                    clock, hour, minute, next_target=next_target
+                )
+                return "auto", new_target, fired
+
+            if trigger_ts - clock.now().timestamp() > config.SERVER_TIME_FINAL_SPIN_SEC:
+                break
+            time.sleep(0.0005)
+
+        return None, next_target, fired_date
 
     def run_forever(
         self,
@@ -112,9 +189,10 @@ class HotkeyListener:
         if auto_at and server_clock:
             hour, minute = parse_hhmm(auto_at)
             next_target = next_run_at(server_clock, hour, minute)
+            trigger = auto_run_trigger_at(next_target)
             print(
                 f"[Schedule] 다음 자동 실행: {format_kst(next_target)} "
-                f"(현재 서버 {format_kst(server_clock.now())})",
+                f"(트리거 ≥{format_kst(trigger)}, 현재 {format_kst(server_clock.now())})",
                 flush=True,
             )
 
@@ -150,6 +228,31 @@ class HotkeyListener:
                     continue
 
                 if server_clock and next_target and auto_at:
+                    rem = seconds_until(next_target, server_clock)
+                    if 0 < rem <= config.SERVER_TIME_FINAL_SPIN_SEC:
+                        spin_event, next_target, fired_date = self._spin_until_auto_run(
+                            server_clock,
+                            hour,
+                            minute,
+                            next_target=next_target,
+                            fired_date=fired_date,
+                        )
+                        if spin_event == "exit":
+                            print("[Hotkey] 종료", flush=True)
+                            break
+                        if spin_event == "macro":
+                            if server_clock:
+                                print(f"[Server] {format_kst(server_clock.now())}", flush=True)
+                            on_macro()
+                            continue
+                        if spin_event == "auto":
+                            on_macro()
+                            print(
+                                f"[Schedule] 다음 자동 실행: {format_kst(next_target)}",
+                                flush=True,
+                            )
+                            continue
+
                     next_target, fired_date, triggered = self._check_auto_run(
                         server_clock, hour, minute,
                         next_target=next_target,
@@ -164,12 +267,13 @@ class HotkeyListener:
                         continue
 
                     now_mono = time.monotonic()
-                    if now_mono - last_status >= 60:
-                        last_status = now_mono
-                        rem = seconds_until(next_target, server_clock)
-                        if rem > 0:
+                    rem = seconds_until(next_target, server_clock)
+                    if rem > 0:
+                        status_interval = _status_log_interval(rem)
+                        if now_mono - last_status >= status_interval:
+                            last_status = now_mono
                             print(
-                                f"[Schedule] 대기 {int(rem // 3600)}h {int((rem % 3600) // 60)}m "
+                                f"[Schedule] 대기 {_format_wait_remaining(rem)} "
                                 f"| 서버 {format_kst(server_clock.now())}",
                                 flush=True,
                             )

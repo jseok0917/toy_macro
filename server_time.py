@@ -39,11 +39,34 @@ class ServerClock:
         if not force and time.monotonic() - self._last_sync < interval:
             return self.now()
 
+        estimated = self.now()
         local_mid = time.time()
         try:
             server = fetch_server_now()
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"서버 시간 조회 실패: {exc}") from exc
+
+        est_ts = estimated.timestamp()
+        srv_ts = server.timestamp()
+        lag = est_ts - srv_ts
+
+        if self._last_sync > 0 and lag > config.SERVER_TIME_STALE_MAX_SEC:
+            # Date 헤더가 낡음 — 시계를 앞당기지 않고, 느린 쪽으로만 맞춤
+            print(
+                f"[Server] Date 지연 — 시계 보수 보정 (응답 {format_kst(server)}, "
+                f"추정 {format_kst(estimated)}, -{lag:.1f}s)",
+                flush=True,
+            )
+            if est_ts > srv_ts:
+                self._offset_sec = srv_ts - local_mid
+                self._last_sync = time.monotonic()
+            return self.now()
+
+        lead = srv_ts - est_ts
+        if self._last_sync > 0 and lead > 0:
+            capped_ts = min(srv_ts, est_ts + config.SERVER_TIME_MAX_FORWARD_SEC)
+            if capped_ts < srv_ts:
+                server = datetime.fromtimestamp(capped_ts, tz=KST)
 
         self._offset_sec = server.timestamp() - local_mid
         self._last_sync = time.monotonic()
@@ -56,14 +79,16 @@ class ServerClock:
         )
 
     def maybe_resync_near(self, target: datetime) -> None:
-        """자동 실행 직전 정밀 동기화."""
+        """자동 실행 직전 동기화 (마지막 구간은 로컬 시계만 사용)."""
         remaining = (target - self.now()).total_seconds()
         if remaining <= 0:
             return
+        if remaining <= config.SERVER_TIME_FINAL_SPIN_SEC:
+            return
         if remaining <= config.SERVER_TIME_PRE_SYNC_SEC:
-            self.sync(force=True)
+            if time.monotonic() - self._last_sync >= 1.0:
+                self.sync(force=True)
         elif remaining <= config.SERVER_TIME_PRE_SYNC_SEC * 2:
-            # 임박 구간: 주기보다 자주 동기화
             if time.monotonic() - self._last_sync >= min(5, config.SERVER_TIME_SYNC_INTERVAL):
                 self.sync(force=True)
 
@@ -88,5 +113,10 @@ def format_kst(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S KST")
 
 
+def auto_run_trigger_at(target: datetime) -> datetime:
+    """설정 시각 + MIN_DELAY ms 이후에만 실행 (11:00:00 이전 방지)."""
+    return target + timedelta(milliseconds=config.AUTO_RUN_MIN_DELAY_MS)
+
+
 def seconds_until(target: datetime, clock: ServerClock) -> float:
-    return (target - clock.now()).total_seconds()
+    return (auto_run_trigger_at(target) - clock.now()).total_seconds()

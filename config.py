@@ -48,6 +48,7 @@ SYSTEM_CHROME_PROFILE = "Default"
 
 # ── 자동등록 방지 (Enter 키) ────────────────────────────────────
 CAPTCHA_TIMEOUT = 15
+RECAPTCHA_WAIT_TIMEOUT = 120  # '로봇이 아닙니다' 수동 완료 대기(초)
 CAPTCHA_WAIT_BEFORE_ENTER = 0
 CAPTCHA_SETTLE_WAIT = 0
 CAPTCHA_ENTER_RETRY = 1
@@ -57,8 +58,8 @@ CAPTCHA_ENTER_RETRY = 1
 # SUCCESS_SELECTOR = "#main-content"
 
 # ── 예약자 정보 ─────────────────────────────────────────────────
-RESERVATION_NAME = "일이삼"
-RESERVATION_PHONE = "1234-0000"   # 010은 페이지 고정, mobile2-mobile3
+RESERVATION_NAME = "석지명"
+RESERVATION_PHONE = "2736-3607"   # 010은 페이지 고정, mobile2-mobile3
 
 
 def get_reservation_name() -> str:
@@ -88,9 +89,14 @@ def get_reservation_phone_parts() -> tuple[str, str]:
     return mid, last
 
 # ── 예약 대상 (여기만 수정) ─────────────────────────────────────
+### 투투어드벤처
 ZIZUM_NUM = 23              # 지점 번호
 THEME_NUM = 69              # 테마 번호
 THEME_INFO_NUM = 60         # 테마 상세 번호 (theme_info_num)
+### 머니머니패키지
+# ZIZUM_NUM = 19              # 지점 번호
+# THEME_NUM = 60              # 테마 번호
+# THEME_INFO_NUM = 38         # 테마 상세 번호 (theme_info_num)
 
 RESERVATION_BASE_URL = "https://www.keyescape.com/reservation1.php"
 
@@ -113,21 +119,57 @@ def build_reservation_url(
 
 # ── 매크로 (예약 일시) ───────────────────────────────────────────
 MACRO_HOTKEY = "f9"
-MACRO_DAY_OFFSET = 4          # 서버 SYSDATE + N 일
-MACRO_TIME = "09:20"          # 예약 시간 슬롯 (HH:MM)
+MACRO_DAY_OFFSET = 6          # 서버 SYSDATE + N 일
+MACRO_TIME = "18:55"          # 우선 예약 시간 (HH:MM)
+
+# 테마별 시간 슬롯 (늦은 순서). MACRO_TIME 마감 시 이후 슬롯에서 자동 선택
+MACRO_TIME_SLOTS = [
+    "09:45", "10:40", "11:35", "12:30", "13:25", "14:20",
+    "15:15", "16:10", "17:05", "18:00", "18:55", "19:50", "20:45", "21:40"
+]
+
+
+def normalize_hhmm(value: str) -> str:
+    hour, minute = value.strip().split(":", 1)
+    return f"{int(hour):02d}:{int(minute):02d}"
+
+
+def hhmm_to_minutes(value: str) -> int:
+    hour, minute = normalize_hhmm(value).split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def get_macro_time_candidates() -> list[str]:
+    """MACRO_TIME 우선, 이후 MACRO_TIME_SLOTS에서 더 늦은 시간."""
+    preferred = normalize_hhmm(MACRO_TIME)
+    slots = [normalize_hhmm(s) for s in MACRO_TIME_SLOTS]
+    if preferred in slots:
+        return slots[slots.index(preferred):]
+    later = [s for s in slots if hhmm_to_minutes(s) > hhmm_to_minutes(preferred)]
+    return [preferred, *later]
 
 # 속도 (응답 오면 바로 다음 단계 — sleep 없음, 폴링만)
 MACRO_STEP_DELAY = 0
-MACRO_WAIT_TIMEOUT = 6
+MACRO_WAIT_TIMEOUT = 0.1
 MACRO_POLL_INTERVAL = 0.02
+MACRO_TIME_CLICK_TIMEOUT = 0.3  # 시간 슬롯 클릭 시도 (마감 시 다음 슬롯으로 빠르게)
+MACRO_TIME_LIST_WAIT_TIMEOUT = 15  # 날짜 클릭 후 시간 목록 AJAX 응답 대기(초)
+MACRO_TIME_GROUP_RETRY_MAX = 10  # (설정시간→이후시간 전체 스캔) 재시도 횟수
+MACRO_TIME_GROUP_RETRY_DELAY = 0.05  # 그룹 재시도 간격(초)
+MACRO_ALERT_RETRY_DELAY = 0.05  # 재시도 전 대기(초)
+MACRO_ALERT_RETRY_MAX = 100       # 날짜/시간 목록 재시도 최대 횟수
 MACRO_MASK_TIMEOUT = 2
 MACRO_SUBMIT_TIMEOUT = 10
 
 # ── 서버 시각 자동 실행 ─────────────────────────────────────────
 AUTO_RUN_ENABLED = True
-AUTO_RUN_AT = "04:06"           # 서버 KST (HH:MM)
+AUTO_RUN_AT = "11:00"           # 서버 KST (HH:MM) — 이 시각 이후 실행
+AUTO_RUN_MIN_DELAY_MS = 5      # 11:00:00.005 이후 실행 (1~50, 이전 실행 방지)
 SERVER_TIME_SYNC_INTERVAL = 15  # 서버 시각 재동기화 주기(초)
-SERVER_TIME_PRE_SYNC_SEC = 30   # 실행 N초 전부터 매 루프 재동기화
+SERVER_TIME_PRE_SYNC_SEC = 30   # 실행 N초 전부터 재동기화 구간
+SERVER_TIME_FINAL_SPIN_SEC = 3  # 마지막 N초: HTTP sync 끄고 ms 단위 대기
+SERVER_TIME_STALE_MAX_SEC = 2.0 # HTTP Date가 추정보다 느리면 → 시계 뒤로만 보정
+SERVER_TIME_MAX_FORWARD_SEC = 0.05  # sync 1회당 시계 앞당김 상한(초)
 SERVER_TIME_TIMEOUT = 5         # HTTP Date 조회 타임아웃(초)
 
 # ── 출력 경로 ───────────────────────────────────────────────────
