@@ -1,2 +1,14 @@
+# ── pip install -r requirements.txt ─────────────────────────────
+# Python 3.10+ 권장 (Windows)
+
+# 브라우저 자동화
 selenium>=4.25.0
 undetected-chromedriver>=3.5.5
+
+# undetected-chromedriver가 함께 설치하는 의존성 (직접 import 하지 않음)
+#   requests, websockets, urllib3  …
+
+# ── pip 대상 아님 (표준 라이브러리) ─────────────────────────────
+# UI 설정 창: tkinter  — Windows용 python.org 설치 시 기본 포함
+# HTTP/API·서버 시각: urllib, json, email
+# 핫키: ctypes (Windows GetAsyncKeyState)

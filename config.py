@@ -1,5 +1,6 @@
 import os
 import re
+import urllib.error
 from pathlib import Path
 
 # 프로젝트 루트
@@ -14,8 +15,8 @@ CHROME_MODE = "profile"
 # Selenium 탐지 우회 (키이스케이프 등 필수)
 USE_UNDETECTED = True
 
-# Chrome 148 등 — 자동 감지 실패 시 수동 지정
-CHROME_VERSION_MAIN = 148
+# Chrome 메이저 — 자동 감지 실패 시 수동 지정 (현재 설치: 149)
+CHROME_VERSION_MAIN = 149
 
 CHROME_BINARY = Path(
     os.environ.get(
@@ -46,12 +47,12 @@ SYSTEM_CHROME_USER_DATA = Path(
 )
 SYSTEM_CHROME_PROFILE = "Default"
 
-# ── 자동등록 방지 (Enter 키) ────────────────────────────────────
-CAPTCHA_TIMEOUT = 15
-RECAPTCHA_WAIT_TIMEOUT = 120  # '로봇이 아닙니다' 수동 완료 대기(초)
-CAPTCHA_WAIT_BEFORE_ENTER = 0
-CAPTCHA_SETTLE_WAIT = 0
-CAPTCHA_ENTER_RETRY = 1
+# ── reCAPTCHA 자동 통과 (체크박스 클릭 + Enter) ─────────────────
+CAPTCHA_TIMEOUT = 15          # 체크박스 로드 대기(초)
+RECAPTCHA_WAIT_TIMEOUT = 12   # 전체 자동 통과 제한(초)
+CAPTCHA_WAIT_BEFORE_ENTER = 0.05
+CAPTCHA_SETTLE_WAIT = 0.8     # 클릭 후 토큰 확인(회당)
+CAPTCHA_ENTER_RETRY = 10
 
 # CAPTCHA_FOCUS_SELECTOR = "button"
 # CAPTCHA_SELECTOR = "#captcha-box"
@@ -121,12 +122,10 @@ def build_reservation_url(
 MACRO_HOTKEY = "f9"
 MACRO_DAY_OFFSET = 6          # 서버 SYSDATE + N 일
 MACRO_TIME = "18:55"          # 우선 예약 시간 (HH:MM)
+MACRO_TIME_FALLBACK_ENABLED = True  # False면 MACRO_TIME만 시도 (마감 시 이후 슬롯 미사용)
 
-# 테마별 시간 슬롯 (늦은 순서). MACRO_TIME 마감 시 이후 슬롯에서 자동 선택
-MACRO_TIME_SLOTS = [
-    "09:45", "10:40", "11:35", "12:30", "13:25", "14:20",
-    "15:15", "16:10", "17:05", "18:00", "18:55", "19:50", "20:45", "21:40"
-]
+# 테마별 시간 슬롯 — run.bat 시작 시 API(get_theme_time)로 채움
+MACRO_TIME_SLOTS: list[str] = []
 
 
 def normalize_hhmm(value: str) -> str:
@@ -139,10 +138,47 @@ def hhmm_to_minutes(value: str) -> int:
     return int(hour) * 60 + int(minute)
 
 
+def refresh_macro_time_slots(
+    *,
+    date: str | None = None,
+    zizum_num: int | str | None = None,
+    theme_num: int | str | None = None,
+    end_day: int | str = 0,
+):
+    """서버 SYSDATE(또는 지정일) 기준 시간 슬롯을 API에서 받아 MACRO_TIME_SLOTS 갱신."""
+    from datetime import datetime
+
+    from keyescape_api import fetch_theme_time_slots
+    from server_time import KST, fetch_server_now
+
+    global MACRO_TIME_SLOTS
+
+    if date is None:
+        try:
+            date = fetch_server_now().strftime("%Y-%m-%d")
+        except (OSError, RuntimeError, urllib.error.URLError):
+            date = datetime.now(KST).strftime("%Y-%m-%d")
+
+    z = zizum_num if zizum_num is not None else ZIZUM_NUM
+    t = theme_num if theme_num is not None else THEME_NUM
+    api_slots = fetch_theme_time_slots(
+        date,
+        zizum_num=z,
+        theme_num=t,
+        end_day=end_day,
+    )
+    MACRO_TIME_SLOTS = [normalize_hhmm(s.time) for s in api_slots]
+    return api_slots
+
+
 def get_macro_time_candidates() -> list[str]:
-    """MACRO_TIME 우선, 이후 MACRO_TIME_SLOTS에서 더 늦은 시간."""
+    """MACRO_TIME 우선, 이후 MACRO_TIME_SLOTS에서 더 늦은 시간 (폴백 off면 MACRO_TIME만)."""
     preferred = normalize_hhmm(MACRO_TIME)
+    if not MACRO_TIME_FALLBACK_ENABLED:
+        return [preferred]
     slots = [normalize_hhmm(s) for s in MACRO_TIME_SLOTS]
+    if not slots:
+        return [preferred]
     if preferred in slots:
         return slots[slots.index(preferred):]
     later = [s for s in slots if hhmm_to_minutes(s) > hhmm_to_minutes(preferred)]
@@ -164,14 +200,26 @@ MACRO_SUBMIT_TIMEOUT = 10
 # ── 서버 시각 자동 실행 ─────────────────────────────────────────
 AUTO_RUN_ENABLED = True
 AUTO_RUN_AT = "11:00"           # 서버 KST (HH:MM) — 이 시각 이후 실행
-AUTO_RUN_MIN_DELAY_MS = 5      # 11:00:00.005 이후 실행 (1~50, 이전 실행 방지)
+AUTO_RUN_MIN_DELAY_MS = 0      # 11:00:00.000+N ms 이후 실행 (0~50, 이전 실행 방지)
 SERVER_TIME_SYNC_INTERVAL = 15  # 서버 시각 재동기화 주기(초)
 SERVER_TIME_PRE_SYNC_SEC = 30   # 실행 N초 전부터 재동기화 구간
 SERVER_TIME_FINAL_SPIN_SEC = 3  # 마지막 N초: HTTP sync 끄고 ms 단위 대기
 SERVER_TIME_STALE_MAX_SEC = 2.0 # HTTP Date가 추정보다 느리면 → 시계 뒤로만 보정
-SERVER_TIME_MAX_FORWARD_SEC = 0.05  # sync 1회당 시계 앞당김 상한(초)
+SERVER_TIME_MAX_FORWARD_SEC = 0  # sync 1회당 시계 앞당김 상한(초)
 SERVER_TIME_TIMEOUT = 5         # HTTP Date 조회 타임아웃(초)
 
 # ── 출력 경로 ───────────────────────────────────────────────────
 OUTPUT_DIR = BASE_DIR / "output"
 SCREENSHOT_DIR = BASE_DIR / "screenshots"
+
+# ── 사용자 설정 (ui/settings.json) ──────────────────────────────
+def _load_user_settings() -> None:
+    try:
+        from ui.storage import apply_saved_settings
+
+        apply_saved_settings()
+    except ImportError:
+        pass
+
+
+_load_user_settings()

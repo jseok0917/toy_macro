@@ -15,7 +15,7 @@
 6. [서버 시각 자동 실행](#6-서버-시각-자동-실행)
 7. [개발자도구 탐지 우회 (핵심)](#7-개발자도구-탐지-우회-핵심)
 8. [기술 스택 & 설계 원칙](#8-기술-스택--설계-원칙)
-9. [설정 가이드 (config.py)](#9-설정-가이드-configpy)
+9. [설정 가이드 (settings.json + UI)](#9-설정-가이드-settingsjson--ui)
 10. [실행 방법](#10-실행-방법)
 11. [트러블슈팅](#11-트러블슈팅)
 
@@ -24,8 +24,9 @@
 ## 1. 한 줄 요약
 
 ```
-run.bat → Chrome(uc) 실행 → devtools 우회 주입 → 예약 페이지 접속
-       → F9 / 서버시각 04:06 / Enter → macro.py가 1~3단계 예약 자동 수행
+run.bat → [설정 UI] → settings.json 저장 → Chrome(uc) 실행 → devtools 우회 주입
+       → 예약 페이지 접속 → F9 / 서버시각 AUTO_RUN_AT / Enter
+       → macro.py가 1~3단계 예약 자동 수행
 ```
 
 키이스케이프는 **Selenium(ChromeDriver) 사용 자체를 개발자도구로 간주**해 페이지를 차단한다.  
@@ -47,8 +48,14 @@ run.bat → Chrome(uc) 실행 → devtools 우회 주입 → 예약 페이지 �
 flowchart TB
     subgraph User["사용자"]
         BAT[run.bat]
+        SET[settings.bat]
         F9[F9 키]
         ENT[터미널 Enter]
+    end
+
+    subgraph Settings["설정 (별도 프로세스)"]
+        UI[ui/app_tk.py]
+        JSON[settings.json]
     end
 
     subgraph Python["Python 프로세스 (main.py)"]
@@ -74,6 +81,10 @@ flowchart TB
         API[run_proc.php]
     end
 
+    BAT --> UI
+    SET --> UI
+    UI -->|저장| JSON
+    JSON -->|import 시 로드| CFG
     BAT --> MAIN
     MAIN --> BR
     MAIN --> BYP
@@ -95,17 +106,21 @@ flowchart TB
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Presentation   run.bat, CLI (--auto-at, --once, …)     │
+│  Presentation   run.bat, settings.bat, CLI 옵션          │
+├─────────────────────────────────────────────────────────┤
+│  Settings UI    ui/app_tk.py — tkinter 설정 창           │
+│                 ui/storage.py — settings.json I/O          │
 ├─────────────────────────────────────────────────────────┤
 │  Orchestration  main.py — 세션 시작, bypass, hotkey 루프 │
 ├─────────────────────────────────────────────────────────┤
-│  Automation     macro.py — UI 클릭/입력/제출             │
+│  Automation     macro.py — 페이지 클릭/입력/제출         │
 │  Scheduling     hotkey.py + server_time.py              │
+│  API 조회       keyescape_api.py — 시간 슬롯 등         │
 ├─────────────────────────────────────────────────────────┤
 │  Browser        browser.py — uc Chrome 생성              │
 │  Bypass         keyescape_bypass.py — CDP 2단계 우회     │
 ├─────────────────────────────────────────────────────────┤
-│  Config         config.py — URL, 시간, 예약자 정보       │
+│  Config         config.py 기본값 + settings.json 덮어쓰기 │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -113,16 +128,22 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    runbat[run.bat] --> main[main.py]
-    main --> config[config.py]
+    runbat[run.bat] --> uitk[ui/app_tk.py]
+    uitk --> storage[ui/storage.py]
+    storage --> json[(settings.json)]
+    json --> config[config.py]
+    runbat --> main[main.py]
+    main --> config
     main --> browser[browser.py]
     main --> bypass[keyescape_bypass.py]
     main --> hotkey[hotkey.py]
     main --> macro[macro.py]
+    main --> api[keyescape_api.py]
     hotkey --> server[server_time.py]
     macro --> config
     macro --> bypass
     macro --> manual[manual_wait.py]
+    config --> api
     browser --> config
     bypass --> selenium[(Selenium CDP)]
     browser --> uc[(undetected-chromedriver)]
@@ -134,11 +155,17 @@ flowchart LR
 
 | 파일 | 역할 |
 |------|------|
-| `run.bat` | venv Python으로 `main.py` 실행 |
+| `run.bat` | 설정 UI(선택) → venv Python으로 `main.py` 실행 |
+| `settings.bat` | 설정 UI만 실행 (`python -m ui.app_tk --settings`) |
 | `main.py` | CLI 파싱, Chrome 세션, bypass 적용, hotkey 루프 |
-| `config.py` | **모든 설정의 단일 진실(Single Source of Truth)** |
+| `config.py` | 코드 기본값 + 함수; import 시 `settings.json` 반영 |
+| `settings.json` | UI로 편집하는 사용자 설정 (gitignore) |
+| `ui/app_tk.py` | tkinter 설정 창 (7개 탭, 스크롤 폼) |
+| `ui/schema.py` | 설정 필드 스키마 (51개 항목) |
+| `ui/storage.py` | `settings.json` 읽기/검증/저장/`config` 반영 |
 | `browser.py` | `undetected-chromedriver` / attach / standard Chrome 생성 |
 | `keyescape_bypass.py` | devtools-detector CDN 차단 + JS stub + innerHTML 방어 |
+| `keyescape_api.py` | `run_proc.php` HTTP 조회 (시간 슬롯 등) |
 | `macro.py` | 예약 1→2→3단계 자동화 (F9 트리거) |
 | `hotkey.py` | F9/ESC 폴링, 터미널 Enter, 서버 시각 자동 실행 |
 | `server_time.py` | HTTP `Date` 헤더 → KST, offset 기반 `now()` |
@@ -162,6 +189,7 @@ sequenceDiagram
     participant S as server_time.py
 
     U->>M: run.bat
+    Note over U,M: (선택) ui/app_tk → settings.json 저장
     M->>B: create_driver(profile + uc)
     B-->>M: Chrome driver
     M->>Y: apply_keyescape_bypass()  ※ get() 전
@@ -181,7 +209,7 @@ sequenceDiagram
 |--------|------|
 | **F9** | Windows `GetAsyncKeyState` 폴링 |
 | **터미널 Enter** | 별도 daemon 스레드 `input()` |
-| **서버 시각** | `AUTO_RUN_AT` (예: 04:06 KST) 도달 시 자동 |
+| **서버 시각** | `AUTO_RUN_AT` (예: 11:00 KST) 도달 시 자동 |
 
 > Selenium 호출은 **반드시 메인 스레드**에서만 실행 (`hotkey.py` → `on_macro()` 콜백).
 
@@ -293,7 +321,7 @@ now()  = datetime.fromtimestamp(time.time() + offset, tz=KST)
 | 10초 ~ 1초 | 10ms |
 | 1초 이내 | **5ms** |
 
-조건: `server_clock.now() >= next_target(04:06:00)` → `run_macro()` 실행  
+조건: `server_clock.now() >= next_target(AUTO_RUN_AT)` → `run_macro()` 실행  
 (하루 1회만 발동 — `fired_date`로 중복 방지)
 
 ---
@@ -526,13 +554,24 @@ run.bat → uc.Chrome(user_data_dir=chrome_profile) → bypass → get(url) → 
 
 | 영역 | 기술 |
 |------|------|
-| 언어 | Python 3.x |
-| 브라우저 자동화 | Selenium 4 + **undetected-chromedriver** |
+| 언어 | Python 3.10+ |
+| 브라우저 자동화 | Selenium 4 + **undetected-chromedriver** (`requirements.txt`) |
+| 설정 UI | **tkinter** (표준 라이브러리, pip 불필요) |
+| 설정 저장 | `settings.json` + `ui/storage.py` |
 | CDP | `execute_cdp_cmd` (Network, Page) |
 | 핫키 | Windows `ctypes` + `GetAsyncKeyState` |
 | 서버 시각 | `urllib` + HTTP `Date` 헤더 |
+| 사이트 API | `keyescape_api.py` → `POST /controller/run_proc.php` |
 | reCAPTCHA | Google reCAPTCHA v2 + Enter 키 우회 시도 |
-| 사이트 API | `POST /controller/run_proc.php` (브라우저 AJAX) |
+
+#### pip 의존성 (`requirements.txt`)
+
+```
+selenium>=4.25.0
+undetected-chromedriver>=3.5.5
+```
+
+`undetected-chromedriver`가 `requests`, `websockets` 등을 **간접 설치**하지만 애플리케이션 코드는 `urllib` 위주로 HTTP를 처리한다.
 
 ### 8.2 속도 최적화 원칙
 
@@ -553,51 +592,83 @@ Selenium WebDriver는 **스레드 세이프하지 않음** → 반드시 메인 
 
 ---
 
-## 9. 설정 가이드 (config.py)
+## 9. 설정 가이드 (settings.json + UI)
 
-### 9.1 예약 대상
+### 9.1 설정 로드 순서
 
-```python
-ZIZUM_NUM = 23
-THEME_NUM = 69
-THEME_INFO_NUM = 60
+```mermaid
+flowchart LR
+    A[config.py 기본값] --> B{settings.json 존재?}
+    B -->|Yes| C[ui/storage.apply_saved_settings]
+    B -->|No| D[기본값만 사용]
+    C --> E[import config 완료]
+    D --> E
 ```
 
-### 9.2 매크로 타이밍
+1. `config.py`에 코드 기본값·헬퍼 함수 정의
+2. 모듈 import 마지막에 `_load_user_settings()` → `settings.json` 덮어쓰기
+3. UI(`ui/app_tk.py`)는 저장 시 `settings.json`만 갱신 (다음 `main.py` 실행부터 반영)
 
-```python
-MACRO_DAY_OFFSET = 4      # 서버 오늘 + 4일
-MACRO_TIME = "09:20"      # 예약 시간 슬롯
-AUTO_RUN_AT = "04:06"     # 서버 KST 자동 실행 시각
+### 9.2 UI 탭별 설정 항목
+
+| 탭 | 주요 키 |
+|----|---------|
+| 예약 | `zizum_num`, `theme_num`, `theme_info_num`, `reservation_name`, `reservation_phone`, `macro_day_offset`, `macro_time`, `macro_time_slots`, `macro_hotkey` |
+| Chrome | `chrome_mode`, `use_undetected`, `chrome_version_main`, `chrome_binary`, `headless`, … |
+| 매크로 | `macro_poll_interval`, `macro_alert_retry_max`, … |
+| 서버 시각 | `auto_run_enabled`, `auto_run_at`, `server_time_sync_interval`, … |
+| CAPTCHA | `captcha_timeout`, `recaptcha_wait_timeout`, … |
+| 경로 | `output_dir`, `screenshot_dir` |
+| UI | `skip_ui_on_run` |
+
+전체 필드 정의: `ui/schema.py` (`SETTING_FIELDS`, 51개).
+
+### 9.3 예시 (settings.json)
+
+```json
+{
+  "zizum_num": 23,
+  "theme_num": 69,
+  "theme_info_num": 60,
+  "macro_day_offset": 6,
+  "macro_time": "18:55",
+  "auto_run_enabled": true,
+  "auto_run_at": "11:00"
+}
 ```
 
-### 9.3 예약자 정보
+템플릿: `settings.example.json` — 개인정보는 git에 커밋하지 않음.
 
-```python
-RESERVATION_NAME = "..."
-RESERVATION_PHONE = "XXXX-XXXX"   # 010-XXXX-XXXX 중 뒤 8자리
-```
+### 9.4 config.py 직접 수정
 
-### 9.4 속도 튜닝
+UI에 없거나 기본값만 바꿀 때 `config.py`를 편집해도 된다.  
+`settings.json`에 같은 키가 있으면 **JSON이 우선**한다.
 
-```python
-MACRO_POLL_INTERVAL = 0.02
-MACRO_WAIT_TIMEOUT = 6
-CAPTCHA_WAIT_BEFORE_ENTER = 0
-CAPTCHA_SETTLE_WAIT = 0
-```
+`MACRO_TIME_SLOTS`는 비어 있으면 `config.refresh_macro_time_slots()` / `keyescape_api`로 실행 시 채운다.
 
 ---
 
 ## 10. 실행 방법
 
+### 10.1 최초 설치
+
 ```powershell
 cd F:\Workspace\Crawling\keyscape
-.\run.bat                    # 접속 + F9/자동 실행 대기
-.\run.bat --once             # 접속만
-.\run.bat --no-auto          # F9/Enter 수동만
-.\run.bat --auto-at 04:06    # 자동 실행 시각 override
-.\run.bat --show-server-time # 서버 KST 확인
+python -m venv .venv
+.\.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+### 10.2 일반 실행
+
+```powershell
+.\run.bat                      # 설정 UI → 저장 후 매크로
+.\settings.bat                 # 설정 UI만
+.\run.bat --no-ui              # UI 건너뛰기
+.\run.bat --settings           # skip_ui_on_run 이어도 UI 표시
+.\run.bat --once               # 접속만
+.\run.bat --no-auto            # F9/Enter 수동만
+.\run.bat --auto-at 11:00      # 자동 실행 시각 override
+.\run.bat --show-server-time   # 서버 KST 확인
 ```
 
 | 키 | 동작 |
@@ -606,18 +677,27 @@ cd F:\Workspace\Crawling\keyscape
 | ESC | 종료 |
 | Enter (터미널) | 매크로 실행 (F9 폴백) |
 
+### 10.3 설정 UI 단독 실행 (개발)
+
+```powershell
+.\.venv\Scripts\python.exe -m ui.app_tk --settings
+```
+
 ---
 
 ## 11. 트러블슈팅
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
+| `ModuleNotFoundError: selenium` | venv 미설치 | `pip install -r requirements.txt` |
+| 설정 창 안 뜸 | tkinter 미포함 Python | `python -m tkinter` 확인, python.org 재설치(tcl/tk) |
 | "개발자 도구 금지" 검은 화면 | bypass 미적용 / attach 모드 | `profile` + `USE_UNDETECTED=True`, `chrome_profile/` 삭제 후 재실행 |
-| F9 무반응 | pynput 이슈 | 터미널 Enter 사용 (이미 폴백 구현됨) |
-| ChromeDriver 버전 오류 | Chrome 업데이트 | `CHROME_VERSION_MAIN` 수정 |
+| F9 무반응 | 포커스/권한 | 터미널 Enter 사용 (이미 폴백 구현됨) |
+| ChromeDriver 버전 오류 | Chrome 업데이트 | 설정 UI 또는 `CHROME_VERSION_MAIN` 수정 |
 | reCAPTCHA 실패 | Google bot 판별 | `CAPTCHA_ENTER_RETRY` 증가, headless 끄기 |
 | 예약 날짜 없음 | 아직 오픈 전 / offset 오류 | `MACRO_DAY_OFFSET`, 서버 SYSDATE 확인 |
 | 자동 실행 시각 어긋남 | PC 시계 drift | `SERVER_TIME_PRE_SYNC_SEC` 구간 재동기화 확인 |
+| settings 반영 안 됨 | 저장 안 함 / 키 오타 | `settings.json` 저장 후 재실행, `settings.example.json` 참고 |
 
 ### bypass 검증
 
@@ -648,4 +728,4 @@ sequenceDiagram
 
 ---
 
-*문서 버전: 2026-06-08 — 프로젝트 현재 코드 기준*
+*문서 버전: 2026-06-24 — settings UI, settings.json, keyescape_api 반영*

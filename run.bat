@@ -31,6 +31,14 @@ if exist "%PROFILE%\SingletonLock" del /f /q "%PROFILE%\SingletonLock" >nul 2>&1
 if exist "%PROFILE%\SingletonSocket" del /f /q "%PROFILE%\SingletonSocket" >nul 2>&1
 if exist "%PROFILE%\DevToolsActivePort" del /f /q "%PROFILE%\DevToolsActivePort" >nul 2>&1
 
+set "SKIP_UI=0"
+for %%A in (%*) do if /I "%%A"=="--no-ui" set "SKIP_UI=1"
+
+if "%SKIP_UI%"=="0" (
+    "%PY%" -m ui.app_tk %*
+    if errorlevel 1 exit /b 1
+)
+
 "%PY%" "%~dp0main.py" %*
 set "EXIT_CODE=%ERRORLEVEL%"
 

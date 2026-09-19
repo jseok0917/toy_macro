@@ -18,6 +18,7 @@ import config
 from browser import create_driver, create_wait
 from hotkey import HotkeyListener
 from keyescape_bypass import apply_keyescape_bypass, is_keyescape_url
+from keyescape_api import format_slots_display
 from macro import run_macro
 from server_time import ServerClock, format_kst
 from tab_utils import attach_current_tab, print_debug_tabs
@@ -42,10 +43,23 @@ def print_reservation_config(url: str, *, auto_at: str | None, auto_enabled: boo
     print(f"  상세 theme_info_num = {config.THEME_INFO_NUM}", flush=True)
     print(f"  예약 날짜           = 서버 SYSDATE+{config.MACRO_DAY_OFFSET}", flush=True)
     print(f"  예약 시간           = {config.MACRO_TIME}", flush=True)
+    fallback = "켜짐" if config.MACRO_TIME_FALLBACK_ENABLED else "꺼짐"
+    print(f"  이후 슬롯 자동      = {fallback}", flush=True)
     print(f"  예약자              = {config.RESERVATION_NAME}", flush=True)
     print(f"  연락처              = 010-{config.RESERVATION_PHONE}", flush=True)
     print(f"  자동 실행           = {schedule} (서버 KST)", flush=True)
     print(f"  URL                 = {url}", flush=True)
+    try:
+        from server_time import fetch_server_now
+
+        server_now = fetch_server_now()
+        slots = config.refresh_macro_time_slots(
+            date=server_now.strftime("%Y-%m-%d"),
+        )
+        print(f"  서버 SYSDATE        = {server_now.strftime('%Y-%m-%d')}", flush=True)
+        print(f"  시간 슬롯 ({len(slots)}개)  = {format_slots_display(slots)}", flush=True)
+    except Exception as exc:
+        print(f"  [WARN] 시간 슬롯 API 조회 실패: {exc}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,6 +116,16 @@ def parse_args() -> argparse.Namespace:
         "--show-server-time",
         action="store_true",
         help="서버 시각 출력 후 종료",
+    )
+    parser.add_argument(
+        "--no-ui",
+        action="store_true",
+        help="설정 UI 건너뛰기 (run.bat에서 사용)",
+    )
+    parser.add_argument(
+        "--settings",
+        action="store_true",
+        help="설정 UI 강제 표시 (run.bat에서 사용)",
     )
     return parser.parse_args()
 

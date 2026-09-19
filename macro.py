@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 from selenium import webdriver
 from selenium.common.exceptions import NoAlertPresentException, TimeoutException, UnexpectedAlertPresentException
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -207,8 +209,11 @@ def _click_date(driver: webdriver.Chrome, wait: WebDriverWait, date_str: str) ->
 
 
 def _format_slot_list(slots: dict[str, bool]) -> str:
+    order = [config.normalize_hhmm(s) for s in config.MACRO_TIME_SLOTS]
+    if not order:
+        order = sorted(slots.keys(), key=config.hhmm_to_minutes)
     parts = []
-    for time_str in config.MACRO_TIME_SLOTS:
+    for time_str in order:
         norm = config.normalize_hhmm(time_str)
         if norm not in slots:
             continue
@@ -318,68 +323,315 @@ def _fill_form_batch(driver: webdriver.Chrome, name: str, mobile2: str, mobile3:
     )
 
 
+_RECAPTCHA_TOKEN_JS = """
+try {
+    const areas = document.querySelectorAll(
+        '#g-recaptcha-response, textarea[name="g-recaptcha-response"], textarea.g-recaptcha-response'
+    );
+    for (const ta of areas) {
+        if (ta && ta.value && ta.value.length > 0) return ta.value;
+    }
+    const read = (api) => {
+        if (!api || typeof api.getResponse !== 'function') return '';
+        try {
+            const r = api.getResponse();
+            if (r && r.length > 0) return r;
+        } catch (e) {}
+        return '';
+    };
+    if (typeof grecaptcha !== 'undefined') {
+        let r = read(grecaptcha);
+        if (r) return r;
+        r = read(grecaptcha.enterprise);
+        if (r) return r;
+    }
+} catch (e) {}
+return '';
+"""
+
+
+def _ensure_default_content(driver: webdriver.Chrome) -> None:
+    try:
+        driver.switch_to.default_content()
+    except Exception:
+        pass
+
+
+def _recaptcha_token(driver: webdriver.Chrome) -> str:
+    """부모 페이지의 reCAPTCHA 응답 토큰 (없으면 '')."""
+    _ensure_default_content(driver)
+    try:
+        return str(driver.execute_script(_RECAPTCHA_TOKEN_JS) or "")
+    except Exception:
+        return ""
+
+
 def _recaptcha_solved(driver: webdriver.Chrome) -> bool:
-    return bool(
-        driver.execute_script(
-            """
-            if (typeof grecaptcha !== 'undefined' && grecaptcha.getResponse().length > 0) {
-                return true;
-            }
-            const anchor = document.querySelector('#recaptcha-anchor[aria-checked="true"]');
-            if (anchor) return true;
-            return !!document.querySelector('.recaptcha-checkbox-checked');
-            """
-        )
+    """토큰이 있을 때만 통과. (체크 UI만으로는 이미지 챌린지 미완료일 수 있음)"""
+    return bool(_recaptcha_token(driver))
+
+
+def _recaptcha_anchor_frames(driver: webdriver.Chrome):
+    _ensure_default_content(driver)
+    frames = driver.find_elements(
+        By.CSS_SELECTOR,
+        "iframe[src*='recaptcha'][src*='anchor'], iframe[title*='reCAPTCHA']",
     )
+    if frames:
+        return frames
+    return [
+        f
+        for f in driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']")
+        if "bframe" not in (f.get_attribute("src") or "")
+    ]
 
 
 def _has_recaptcha(driver: webdriver.Chrome) -> bool:
-    return bool(
-        driver.find_elements(By.CSS_SELECTOR, "#captcha")
-        or driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']")
-    )
+    """페이지에 reCAPTCHA 위젯이 있는지 (iframe 껍데기만 있어도 True)."""
+    _ensure_default_content(driver)
+    if _recaptcha_anchor_frames(driver):
+        return True
+    boxes = driver.find_elements(By.CSS_SELECTOR, "#captcha, .g-recaptcha")
+    for box in boxes:
+        try:
+            if box.find_elements(By.CSS_SELECTOR, "iframe"):
+                return True
+            if box.is_displayed() and box.size.get("height", 0) > 10:
+                return True
+        except Exception:
+            continue
+    return False
 
 
-def _wait_recaptcha_solved(driver: webdriver.Chrome, *, context: str) -> None:
-    """reCAPTCHA '로봇이 아닙니다' 체크 완료까지 대기."""
+def _recaptcha_anchor_ready(driver: webdriver.Chrome) -> bool:
+    """Google iframe 안 #recaptcha-anchor 가 실제로 그려져 클릭 가능한지."""
+    for frame in _recaptcha_anchor_frames(driver):
+        try:
+            driver.switch_to.frame(frame)
+            ready = driver.execute_script(
+                """
+                const a = document.querySelector('#recaptcha-anchor');
+                if (!a) return false;
+                const r = a.getBoundingClientRect();
+                return r.width > 10 && r.height > 10;
+                """
+            )
+            if ready:
+                return True
+        except Exception:
+            pass
+        finally:
+            _ensure_default_content(driver)
+    return False
+
+
+def _wait_recaptcha_anchor_ready(driver: webdriver.Chrome, *, timeout: float) -> bool:
+    """api.js / iframe 로드 완료까지 대기. 이전이면 클릭이 허공으로 감."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _recaptcha_solved(driver):
+            return True
+        if _recaptcha_anchor_ready(driver):
+            return True
+        time.sleep(max(config.MACRO_POLL_INTERVAL, 0.05))
+    return False
+
+
+def _cdp_click_at(driver: webdriver.Chrome, x: float, y: float) -> None:
+    """최상위 뷰포트 좌표로 CDP 마우스 클릭."""
+    for typ in ("mouseMoved", "mousePressed", "mouseReleased"):
+        driver.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {
+                "type": typ,
+                "x": x,
+                "y": y,
+                "button": "left",
+                "clickCount": 1,
+                "buttons": 1 if typ == "mousePressed" else 0,
+            },
+        )
+
+
+def _click_recaptcha_checkbox(driver: webdriver.Chrome) -> bool:
+    """anchor iframe의 '로봇이 아닙니다' 체크박스 자동 클릭."""
+    for frame in _recaptcha_anchor_frames(driver):
+        try:
+            # 화면 밖이면 CDP 좌표가 빗나감 → 중앙으로 스크롤
+            driver.execute_script(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                frame,
+            )
+            iframe_rect = driver.execute_script(
+                """
+                const r = arguments[0].getBoundingClientRect();
+                const vv = window.visualViewport;
+                return {
+                    x: r.left + (vv ? vv.offsetLeft : 0),
+                    y: r.top + (vv ? vv.offsetTop : 0),
+                    w: r.width,
+                    h: r.height,
+                };
+                """,
+                frame,
+            )
+            if not iframe_rect or iframe_rect.get("w", 0) < 10:
+                continue
+
+            driver.switch_to.frame(frame)
+            info = driver.execute_script(
+                """
+                const a = document.querySelector('#recaptcha-anchor');
+                if (!a) return null;
+                a.scrollIntoView({block:'center', inline:'center'});
+                const r = a.getBoundingClientRect();
+                const checked = a.getAttribute('aria-checked') === 'true'
+                    || a.classList.contains('recaptcha-checkbox-checked');
+                return {
+                    checked,
+                    x: r.left + r.width / 2,
+                    y: r.top + r.height / 2,
+                    w: r.width,
+                    h: r.height,
+                };
+                """
+            )
+            if not info:
+                continue
+            if info.get("checked"):
+                return True
+            if info.get("w", 0) < 10 or info.get("h", 0) < 10:
+                continue
+
+            # 1순위: iframe 안에서 바로 클릭 (좌표 변환 불필요, 가장 확실)
+            try:
+                anchor = driver.find_element(By.ID, "recaptcha-anchor")
+                ActionChains(driver).move_to_element(anchor).pause(0.03).click().perform()
+                return True
+            except Exception:
+                pass
+
+            abs_x = float(iframe_rect["x"]) + float(info["x"])
+            abs_y = float(iframe_rect["y"]) + float(info["y"])
+            _ensure_default_content(driver)
+            try:
+                _cdp_click_at(driver, abs_x, abs_y)
+                return True
+            except Exception:
+                driver.switch_to.frame(frame)
+                anchor = driver.find_element(By.ID, "recaptcha-anchor")
+                driver.execute_script(
+                    "arguments[0].focus(); arguments[0].click();", anchor
+                )
+                return True
+        except Exception:
+            continue
+        finally:
+            _ensure_default_content(driver)
+    return False
+
+
+def _press_recaptcha_enter(driver: webdriver.Chrome) -> None:
+    """부모 페이지에 Enter — 체크 후 토큰 확정에 사용."""
+    _ensure_default_content(driver)
+    try:
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.send_keys(Keys.ENTER)
+    except Exception:
+        try:
+            driver.execute_script(
+                """
+                const e = new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true});
+                (document.activeElement || document.body).dispatchEvent(e);
+                document.body.dispatchEvent(
+                    new KeyboardEvent('keyup', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true})
+                );
+                """
+            )
+        except Exception:
+            pass
+
+
+def _poll_recaptcha_token(driver: webdriver.Chrome, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _recaptcha_solved(driver):
+            return True
+        time.sleep(max(config.MACRO_POLL_INTERVAL, 0.05))
+    return False
+
+
+def _pass_recaptcha_auto(driver: webdriver.Chrome, *, context: str) -> None:
+    """reCAPTCHA 자동 통과: 체크박스 클릭 → Enter → 토큰 폴링 (수동 입력 없음)."""
+    _ensure_default_content(driver)
     if not _has_recaptcha(driver):
         return
     if _recaptcha_solved(driver):
         return
 
-    print(f"[Macro] reCAPTCHA 대기 ({context}) — '로봇이 아닙니다' 체크 후 진행", flush=True)
+    # #captcha 껍데기만 있고 iframe 안 체크박스가 아직 없으면 클릭이 허공으로 감
+    ready_timeout = float(getattr(config, "CAPTCHA_TIMEOUT", 15) or 15)
+    if not _wait_recaptcha_anchor_ready(driver, timeout=ready_timeout):
+        raise RuntimeError(
+            f"reCAPTCHA 체크박스 로드 타임아웃 ({ready_timeout}s) — ({context})"
+        )
+    if _recaptcha_solved(driver):
+        return
 
-    frames = driver.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']")
-    if frames:
-        driver.switch_to.frame(frames[0])
-        try:
-            anchor = driver.find_elements(By.ID, "recaptcha-anchor")
-            if anchor and anchor[0].get_attribute("aria-checked") != "true":
-                anchor[0].click()
-        except Exception:
-            pass
-        finally:
-            driver.switch_to.default_content()
+    retries = max(0, int(config.CAPTCHA_ENTER_RETRY))
+    attempts = retries + 1
+    # 회당 대기 짧게 — 예전엔 ~3초라 재시도가 너무 느렸음
+    settle = max(0.05, float(getattr(config, "CAPTCHA_SETTLE_WAIT", 0.8) or 0.8))
+    wait_before = max(0.0, float(getattr(config, "CAPTCHA_WAIT_BEFORE_ENTER", 0) or 0))
+    deadline = time.monotonic() + float(config.RECAPTCHA_WAIT_TIMEOUT)
+    print(f"[Macro] reCAPTCHA 자동 통과 ({context}) ×{attempts}", flush=True)
 
-    deadline = time.monotonic() + config.RECAPTCHA_WAIT_TIMEOUT
-    while time.monotonic() < deadline:
-        if _recaptcha_solved(driver):
+    for attempt in range(1, attempts + 1):
+        if time.monotonic() >= deadline:
+            break
+
+        clicked = _click_recaptcha_checkbox(driver)
+        if not clicked:
+            print(f"[Macro] reCAPTCHA 체크박스 없음 ({attempt}/{attempts})", flush=True)
+        else:
+            print(f"[Macro] reCAPTCHA 체크 ({attempt}/{attempts})", flush=True)
+
+        if wait_before > 0:
+            time.sleep(wait_before)
+
+        _press_recaptcha_enter(driver)
+
+        if _poll_recaptcha_token(driver, timeout=settle):
             print("[Macro] reCAPTCHA 통과", flush=True)
             return
-        time.sleep(config.MACRO_POLL_INTERVAL)
+
+    remain = max(0.0, deadline - time.monotonic())
+    if remain > 0 and _poll_recaptcha_token(driver, timeout=remain):
+        print("[Macro] reCAPTCHA 통과", flush=True)
+        return
 
     raise RuntimeError(
-        f"reCAPTCHA 타임아웃 ({config.RECAPTCHA_WAIT_TIMEOUT}s) — 체크 완료 후 다시 실행"
+        f"reCAPTCHA 자동 통과 실패 ({config.RECAPTCHA_WAIT_TIMEOUT}s) — "
+        "프로필/탐지 문제일 수 있음. chrome_profile 삭제 후 재실행"
     )
 
 
+def _wait_recaptcha_solved(driver: webdriver.Chrome, *, context: str) -> None:
+    _pass_recaptcha_auto(driver, context=context)
+
+
 def _pass_recaptcha(driver: webdriver.Chrome, wait: WebDriverWait) -> None:
-    if _has_recaptcha(driver):
+    _ensure_default_content(driver)
+    # 껍데기(#captcha)가 아니라 실제 anchor iframe이 뜰 때까지
+    try:
         wait.until(
-            lambda d: d.find_elements(By.CSS_SELECTOR, "#captcha")
-            or d.find_elements(By.CSS_SELECTOR, "iframe[src*='recaptcha']")
+            lambda d: _recaptcha_solved(d)
+            or bool(_recaptcha_anchor_frames(d))
+            or _has_recaptcha(d)
         )
-    _wait_recaptcha_solved(driver, context="예약하기 전")
+    except TimeoutException:
+        pass
+    _pass_recaptcha_auto(driver, context="예약하기 전")
 
 
 def _find_submit_button(driver: webdriver.Chrome):
@@ -427,7 +679,11 @@ def _run_reservation1(driver: webdriver.Chrome, wait: WebDriverWait, *, server_c
         f"({_format_target_date_label(target_date)})",
         flush=True,
     )
-    print(f"[Macro] 예약 시간 = {config.MACRO_TIME} (마감 시 이후 슬롯 자동)", flush=True)
+    fallback = "켜짐" if config.MACRO_TIME_FALLBACK_ENABLED else "꺼짐"
+    print(
+        f"[Macro] 예약 시간 = {config.MACRO_TIME} (이후 슬롯 자동: {fallback})",
+        flush=True,
+    )
     # _refresh_reservation1(driver, wait)
     _click_date(driver, wait, target_date)
     slots = _collect_time_slots(driver)
